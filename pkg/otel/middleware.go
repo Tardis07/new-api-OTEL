@@ -692,3 +692,42 @@ func truncateStr(s string, maxLen int) string {
 	}
 	return s[:maxLen] + "...[truncated]"
 }
+
+// RecordProcessedStreamOutput records the fully-assembled stream output on the span.
+// This includes concatenated text, tool call details, and reasoning content.
+// Should be called once after stream processing completes (not per-chunk).
+func RecordProcessedStreamOutput(c *gin.Context, fullText string, toolCalls []ProcessedToolCall) {
+	if !enabled {
+		return
+	}
+
+	attrs := []attribute.KeyValue{}
+
+	if fullText != "" {
+		attrs = append(attrs, attribute.String("gen_ai.output.text", truncateStr(fullText, 4096)))
+	}
+
+	for i, tc := range toolCalls {
+		if tc.Name != "" {
+			attrs = append(attrs, attribute.String(fmt.Sprintf("gen_ai.tool_call.%d.name", i), tc.Name))
+		}
+		if tc.Arguments != "" {
+			attrs = append(attrs, attribute.String(fmt.Sprintf("gen_ai.tool_call.%d.arguments", i), truncateStr(tc.Arguments, 2048)))
+		}
+		if tc.ID != "" {
+			attrs = append(attrs, attribute.String(fmt.Sprintf("gen_ai.tool_call.%d.id", i), tc.ID))
+		}
+	}
+
+	if len(attrs) > 0 {
+		addSpanAttributes(c, attrs...)
+	}
+}
+
+// ProcessedToolCall represents a single tool call extracted from stream processing.
+type ProcessedToolCall struct {
+	ID        string
+	Name      string
+	Arguments string
+}
+

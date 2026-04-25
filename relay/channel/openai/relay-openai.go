@@ -180,6 +180,8 @@ func OaiStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Re
 		logger.LogError(c, "error processing tokens: "+err.Error())
 	}
 
+	otelint.RecordProcessedStreamOutput(c, responseTextBuilder.String(), extractToolCalls(streamItems))
+
 	if !containStreamUsage {
 		usage = service.ResponseText2Usage(c, responseTextBuilder.String(), info.UpstreamModelName, info.GetEstimatePromptTokens())
 		usage.CompletionTokens += toolCount * 7
@@ -297,6 +299,23 @@ func OpenaiHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Respo
 			return nil, types.NewError(err, types.ErrorCodeBadResponseBody)
 		}
 		responseBody = geminiRespStr
+	}
+
+	if len(simpleResponse.Choices) > 0 {
+		var fullText strings.Builder
+		var toolCalls []otelint.ProcessedToolCall
+		for _, choice := range simpleResponse.Choices {
+			fullText.WriteString(choice.Message.StringContent())
+			fullText.WriteString(choice.Message.ReasoningContent)
+			for _, tc := range choice.Message.ParseToolCalls() {
+				toolCalls = append(toolCalls, otelint.ProcessedToolCall{
+					ID:        tc.ID,
+					Name:      tc.Function.Name,
+					Arguments: tc.Function.Arguments,
+				})
+			}
+		}
+		otelint.RecordProcessedStreamOutput(c, fullText.String(), toolCalls)
 	}
 
 	service.IOCopyBytesGracefully(c, resp, responseBody)
@@ -721,4 +740,59 @@ func extractLlamaCachedTokensFromBody(body []byte) (int, bool) {
 		return 0, false
 	}
 	return *payload.Timings.CachedTokens, true
+}
+
+func extractToolCalls(streamItems []string) []otelint.ProcessedToolCall {
+	var result []otelint.ProcessedToolCall
+	toolMap := map[int]*otelint.ProcessedToolCall{}
+
+	for _, item := range streamItems {
+		var chunk struct {
+			Choices []struct {
+				Delta struct {
+					ToolCalls []struct {
+						Index    *int   `json:"index"`
+						ID       string `json:"id"`
+						Function struct {
+							Name      string `json:"name"`
+							Arguments string `json:"arguments"`
+						} `json:"function"`
+					} `json:"tool_calls"`
+				} `json:"delta"`
+			} `json:"choices"`
+		}
+		if err := common.Unmarshal([]byte(item), &chunk); err != nil {
+			continue
+		}
+		for _, choice := range chunk.Choices {
+			for _, tc := range choice.Delta.ToolCalls {
+				idx := 0
+				if tc.Index != nil {
+					idx = *tc.Index
+				}
+				if existing, ok := toolMap[idx]; ok {
+					existing.Arguments += tc.Function.Arguments
+					if tc.ID != "" {
+						existing.ID = tc.ID
+					}
+					if tc.Function.Name != "" {
+						existing.Name = tc.Function.Name
+					}
+				} else {
+					toolMap[idx] = &otelint.ProcessedToolCall{
+						ID:        tc.ID,
+						Name:      tc.Function.Name,
+						Arguments: tc.Function.Arguments,
+					}
+				}
+			}
+		}
+	}
+
+	for i := 0; i < len(toolMap); i++ {
+		if tc, ok := toolMap[i]; ok {
+			result = append(result, *tc)
+		}
+	}
+	return result
 }

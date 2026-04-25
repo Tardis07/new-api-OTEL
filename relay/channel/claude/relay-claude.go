@@ -11,6 +11,7 @@ import (
 	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/dto"
 	"github.com/QuantumNous/new-api/logger"
+	otelint "github.com/QuantumNous/new-api/pkg/otel"
 	"github.com/QuantumNous/new-api/relay/channel/openrouter"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	"github.com/QuantumNous/new-api/relay/helper"
@@ -586,6 +587,7 @@ type ClaudeResponseInfo struct {
 	ResponseText strings.Builder
 	Usage        *dto.Usage
 	Done         bool
+	ToolCalls    []otelint.ProcessedToolCall
 }
 
 func cacheCreationTokensForOpenAIUsage(usage *dto.Usage) int {
@@ -740,6 +742,11 @@ func FormatClaudeResponseInfo(claudeResponse *dto.ClaudeResponse, oaiResponse *d
 			if claudeResponse.Delta.Thinking != nil {
 				claudeInfo.ResponseText.WriteString(*claudeResponse.Delta.Thinking)
 			}
+			if claudeResponse.Delta.Type == "input_json_delta" && claudeResponse.Delta.PartialJson != nil {
+				if len(claudeInfo.ToolCalls) > 0 {
+					claudeInfo.ToolCalls[len(claudeInfo.ToolCalls)-1].Arguments += *claudeResponse.Delta.PartialJson
+				}
+			}
 		}
 	} else if claudeResponse.Type == "message_delta" {
 		// 最终的usage获取
@@ -770,6 +777,12 @@ func FormatClaudeResponseInfo(claudeResponse *dto.ClaudeResponse, oaiResponse *d
 		// 判断是否完整
 		claudeInfo.Done = true
 	} else if claudeResponse.Type == "content_block_start" {
+		if claudeResponse.ContentBlock != nil && claudeResponse.ContentBlock.Type == "tool_use" {
+			claudeInfo.ToolCalls = append(claudeInfo.ToolCalls, otelint.ProcessedToolCall{
+				ID:   claudeResponse.ContentBlock.Id,
+				Name: claudeResponse.ContentBlock.Name,
+			})
+		}
 	} else {
 		return false
 	}
@@ -886,6 +899,9 @@ func ClaudeStreamHandler(c *gin.Context, resp *http.Response, info *relaycommon.
 	}
 
 	HandleStreamFinalResponse(c, info, claudeInfo)
+
+	otelint.RecordProcessedStreamOutput(c, claudeInfo.ResponseText.String(), claudeInfo.ToolCalls)
+
 	return claudeInfo.Usage, nil
 }
 
@@ -911,6 +927,19 @@ func HandleClaudeResponseData(c *gin.Context, info *relaycommon.RelayInfo, claud
 		claudeInfo.Usage.PromptTokensDetails.CachedCreationTokens = claudeResponse.Usage.CacheCreationInputTokens
 		claudeInfo.Usage.ClaudeCacheCreation5mTokens = claudeResponse.Usage.GetCacheCreation5mTokens()
 		claudeInfo.Usage.ClaudeCacheCreation1hTokens = claudeResponse.Usage.GetCacheCreation1hTokens()
+	}
+	for _, content := range claudeResponse.Content {
+		if content.Type == "text" && content.Text != nil {
+			claudeInfo.ResponseText.WriteString(*content.Text)
+		}
+		if content.Type == "tool_use" {
+			args, _ := json.Marshal(content.Input)
+			claudeInfo.ToolCalls = append(claudeInfo.ToolCalls, otelint.ProcessedToolCall{
+				ID:        content.Id,
+				Name:      content.Name,
+				Arguments: string(args),
+			})
+		}
 	}
 	var responseData []byte
 	switch info.RelayFormat {
@@ -954,6 +983,7 @@ func ClaudeHandler(c *gin.Context, resp *http.Response, info *relaycommon.RelayI
 	if handleErr != nil {
 		return nil, handleErr
 	}
+	otelint.RecordProcessedStreamOutput(c, claudeInfo.ResponseText.String(), claudeInfo.ToolCalls)
 	return claudeInfo.Usage, nil
 }
 
