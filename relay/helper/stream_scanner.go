@@ -13,6 +13,7 @@ import (
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/logger"
+	otelint "github.com/QuantumNous/new-api/pkg/otel"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	"github.com/QuantumNous/new-api/setting/operation_setting"
 
@@ -256,6 +257,8 @@ func StreamScannerHandler(c *gin.Context, resp *http.Response, info *relaycommon
 				info.SetFirstResponseTime()
 				info.ReceivedResponseCount++
 
+				otelint.EmitStreamChunkEventWithData(c, info.ReceivedResponseCount, data)
+
 				select {
 				case dataChan <- data:
 				case <-ctx.Done():
@@ -296,4 +299,10 @@ func StreamScannerHandler(c *gin.Context, resp *http.Response, info *relaycommon
 	} else {
 		logger.LogError(c, fmt.Sprintf("stream ended: %s, received=%d", info.StreamStatus.Summary(), info.ReceivedResponseCount))
 	}
+
+	ttftMs := float64(0)
+	if info.HasSendResponse() {
+		ttftMs = float64(info.FirstResponseTime.Sub(info.StartTime).Milliseconds())
+	}
+	otelint.RecordStreamEnd(c, info.ReceivedResponseCount, string(info.StreamStatus.EndReason), ttftMs)
 }

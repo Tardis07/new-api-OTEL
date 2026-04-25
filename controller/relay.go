@@ -15,6 +15,7 @@ import (
 	"github.com/QuantumNous/new-api/logger"
 	"github.com/QuantumNous/new-api/middleware"
 	"github.com/QuantumNous/new-api/model"
+	otelint "github.com/QuantumNous/new-api/pkg/otel"
 	"github.com/QuantumNous/new-api/relay"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	relayconstant "github.com/QuantumNous/new-api/relay/constant"
@@ -122,6 +123,10 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 		return
 	}
 
+	otelint.RecordRelayContext(c, string(relayFormat), c.GetString("relay_mode"), relayInfo.OriginModelName, relayInfo.OriginModelName)
+	otelint.RecordUserContext(c, relayInfo.UserId, relayInfo.UserGroup, relayInfo.TokenId, relayInfo.TokenUnlimited)
+	otelint.RecordBillingInfo(c, relayInfo.FinalPreConsumedQuota, relayInfo.PriceData.ModelPrice, relayInfo.PriceData.GroupRatioInfo.GroupRatio, relayInfo.PriceData.ModelRatio, relayInfo.PriceData.UsePrice)
+
 	needSensitiveCheck := setting.ShouldCheckPromptSensitive()
 	needCountToken := constant.CountToken
 	// Avoid building huge CombineText (strings.Join) when token counting and sensitive check are both disabled.
@@ -198,7 +203,6 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 		addUsedChannel(c, channel.Id)
 		bodyStorage, bodyErr := common.GetBodyStorage(c)
 		if bodyErr != nil {
-			// Ensure consistent 413 for oversized bodies even when error occurs later (e.g., retry path)
 			if common.IsRequestBodyTooLargeError(bodyErr) || errors.Is(bodyErr, common.ErrRequestBodyTooLarge) {
 				newAPIError = types.NewErrorWithStatusCode(bodyErr, types.ErrorCodeReadRequestBodyFailed, http.StatusRequestEntityTooLarge, types.ErrOptionWithSkipRetry())
 			} else {
@@ -207,6 +211,8 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 			break
 		}
 		c.Request.Body = io.NopCloser(bodyStorage)
+
+		otelint.RecordRetryInfo(c, retryParam.GetRetry(), c.GetStringSlice("use_channel"), "")
 
 		switch relayFormat {
 		case types.RelayFormatOpenAIRealtime:
@@ -238,6 +244,10 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 	if len(useChannel) > 1 {
 		retryLogStr := fmt.Sprintf("重试：%s", strings.Trim(strings.Join(strings.Fields(fmt.Sprint(useChannel)), "->"), "[]"))
 		logger.LogInfo(c, retryLogStr)
+	}
+
+	if newAPIError != nil {
+		otelint.RecordError(c, string(newAPIError.GetErrorCode()), string(newAPIError.GetErrorType()), newAPIError.StatusCode, types.IsChannelError(newAPIError), types.IsSkipRetryError(newAPIError), newAPIError.MaskSensitiveError())
 	}
 }
 

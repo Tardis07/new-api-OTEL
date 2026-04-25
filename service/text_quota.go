@@ -11,6 +11,7 @@ import (
 	"github.com/QuantumNous/new-api/logger"
 	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/pkg/billingexpr"
+	otelint "github.com/QuantumNous/new-api/pkg/otel"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	"github.com/QuantumNous/new-api/setting/operation_setting"
 	"github.com/QuantumNous/new-api/types"
@@ -324,6 +325,13 @@ func PostTextConsumeQuota(ctx *gin.Context, relayInfo *relaycommon.RelayInfo, us
 	}
 	if originUsage != nil {
 		ObserveChannelAffinityUsageCacheByRelayFormat(ctx, usage, relayInfo.GetFinalRequestRelayFormat())
+		otelint.RecordTokenUsage(ctx, usage.PromptTokens, usage.CompletionTokens)
+		otelint.RecordDetailedTokens(ctx,
+			usage.PromptCacheHitTokens,
+			usage.CompletionTokenDetails.ReasoningTokens,
+			usage.PromptTokensDetails.AudioTokens+usage.CompletionTokenDetails.AudioTokens,
+			usage.PromptTokensDetails.ImageTokens+usage.CompletionTokenDetails.ImageTokens,
+		)
 	}
 
 	adminRejectReason := common.GetContextKeyString(ctx, constant.ContextKeyAdminRejectReason)

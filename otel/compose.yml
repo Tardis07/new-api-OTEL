@@ -1,0 +1,132 @@
+# New-API Self-Hosted OpenTelemetry Stack
+#
+# Services:
+#   - otel-collector: Receives OTLP HTTP/gRPC, forwards to backends
+#   - jaeger: Trace visualization UI
+#   - tempo: Long-term trace storage (Grafana Tempo)
+#   - loki: Log aggregation (optional, for collector logs)
+#   - prometheus: Metrics (collector internal + Tempo)
+#   - grafana: Unified dashboards (Jaeger/Tempo/Loki/Prometheus)
+#
+# Usage:
+#   cd otel && docker compose up -d
+#   Grafana:  http://localhost:3001  (admin/admin)
+#   Jaeger:   http://localhost:16686
+#
+# Then set env vars before running New-API (see client.env.example).
+
+services:
+  # ── OpenTelemetry Collector ──────────────────────────────────────
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.150.1
+    container_name: new-api-otel-collector
+    volumes:
+      - ./otel-collector-config.yaml:/etc/otelcol-contrib/config.yaml:ro
+    ports:
+      # OTLP receivers
+      - "4317:4317"   # gRPC
+      - "4318:4318"   # HTTP  ← New-API connects here
+      # Health check
+      - "13133:13133"  # health check endpoint
+    depends_on:
+      - jaeger
+      - tempo
+      - loki
+    networks:
+      - otel-net
+    restart: unless-stopped
+    http_proxy: false
+
+  # ── Jaeger (trace UI, all-in-one) ───────────────────────────────
+  jaeger:
+    image: jaegertracing/jaeger:2.17.0
+    container_name: new-api-jaeger
+    environment:
+      - COLLECTOR_OTLP_ENABLED=true
+    ports:
+      - "16686:16686"  # Jaeger UI
+      - "14268:14268"  # Jaeger HTTP collector (unused but exposed)
+    networks:
+      - otel-net
+    restart: unless-stopped
+    http_proxy: false
+
+  # ── Grafana Tempo (trace storage) ───────────────────────────────
+  tempo:
+    image: grafana/tempo:2.10.4
+    container_name: new-api-tempo
+    volumes:
+      - ./tempo-config.yaml:/etc/tempo/config.yaml:ro
+      - tempo-data:/var/tempo
+    ports:
+      - "3200:3200"  # Tempo query API
+    command: ["-config.file=/etc/tempo/config.yaml"]
+    networks:
+      - otel-net
+    restart: unless-stopped
+    http_proxy: false
+
+  # ── Loki (log aggregation) ──────────────────────────────────────
+  loki:
+    image: grafana/loki:3.7.1
+    container_name: new-api-loki
+    volumes:
+      - ./loki-config.yaml:/etc/loki/config.yaml:ro
+      - loki-data:/loki
+    ports:
+      - "3100:3100"
+    command: ["-config.file=/etc/loki/config.yaml"]
+    networks:
+      - otel-net
+    restart: unless-stopped
+    http_proxy: false
+
+  # ── Prometheus (metrics) ────────────────────────────────────────
+  prometheus:
+    image: prom/prometheus:v3.11.2
+    container_name: new-api-prometheus
+    volumes:
+      - ./prometheus-config.yaml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    ports:
+      - "9090:9090"
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.retention.time=7d"
+    networks:
+      - otel-net
+    restart: unless-stopped
+    http_proxy: false
+
+  # ── Grafana (unified dashboards) ────────────────────────────────
+  grafana:
+    image: grafana/grafana:13.0.1
+    container_name: new-api-grafana
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_USERS_ALLOW_SIGN_UP=false
+    volumes:
+      - ./grafana-datasources.yaml:/etc/grafana/provisioning/datasources/datasources.yaml:ro
+      - grafana-data:/var/lib/grafana
+    ports:
+      - "3001:3000"
+    depends_on:
+      - jaeger
+      - tempo
+      - loki
+      - prometheus
+    networks:
+      - otel-net
+    restart: unless-stopped
+    http_proxy: false
+
+volumes:
+  tempo-data:
+  loki-data:
+  prometheus-data:
+  grafana-data:
+
+networks:
+  otel-net:
+    driver: bridge

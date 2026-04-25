@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"embed"
 	"fmt"
 	"log"
@@ -19,6 +20,7 @@ import (
 	"github.com/QuantumNous/new-api/middleware"
 	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/oauth"
+	otelint "github.com/QuantumNous/new-api/pkg/otel"
 	"github.com/QuantumNous/new-api/relay"
 	"github.com/QuantumNous/new-api/router"
 	"github.com/QuantumNous/new-api/service"
@@ -150,6 +152,11 @@ func main() {
 	if err != nil {
 		common.SysError(fmt.Sprintf("start pyroscope error : %v", err))
 	}
+
+	if err := otelint.Init(context.Background()); err != nil {
+		common.SysError(fmt.Sprintf("failed to init OpenTelemetry: %v", err))
+	}
+	defer otelint.Shutdown(context.Background())
 
 	// Initialize HTTP server
 	server := gin.New()
